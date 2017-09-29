@@ -76,7 +76,7 @@ static unsigned int 	battery_current;
 static unsigned int  battery_remaining_capacity;
 struct workqueue_struct *bq27541_battery_work_queue = NULL;
 static unsigned int battery_check_interval = BATTERY_POLLING_RATE;
-static char *status_text[] = {"Unknown", "Charging", "Discharging", "Not charging", "Full"};
+//static char *status_text[] = {"Unknown", "Charging", "Discharging", "Not charging", "Full"};
 
 /* Functions declaration */
 static int bq27541_get_psp(int reg_offset, enum power_supply_property psp,union power_supply_propval *val);
@@ -356,22 +356,15 @@ static const struct attribute_group battery_smbus_group = {
 
 static int bq27541_battery_current(void)
 {
-	int ret;
+	
 	int curr = 0;
-
-	ret = bq27541_read_i2c(bq27541_data[REG_CURRENT].addr, &curr, 0);
-	if (ret) {
-		BAT_ERR("error reading current ret = %x\n", ret);
-		return 0;
-	}
+	curr = bq27541_data[REG_CURRENT].max_value;
 
 	curr = (s16)curr;
 
-	if (curr >= bq27541_data[REG_CURRENT].min_value &&
-		curr <= bq27541_data[REG_CURRENT].max_value) {
-		return curr;
-	} else
-		return 0;
+	
+	return curr;
+	
 }
 
 static void battery_status_poll(struct work_struct *work)
@@ -541,14 +534,11 @@ static int bq27541_get_psp(int reg_offset, enum power_supply_property psp,
 	s32 ret;
 	int rt_value=0;
 
-	bq27541_device->smbus_status = bq27541_smbus_read_data(reg_offset, 0, &rt_value);
+	bq27541_device->smbus_status = 0;
 
-	if ((bq27541_device->smbus_status < 0) && (psp != POWER_SUPPLY_PROP_TEMP)) {
-		dev_err(&bq27541_device->client->dev, "%s: i2c read for %d failed\n", __func__, reg_offset);
-		return -EINVAL;
-	}
-
+	
 	if (psp == POWER_SUPPLY_PROP_VOLTAGE_NOW) {
+		rt_value = bq27541_data[REG_VOLTAGE].max_value;
 		if (rt_value >= bq27541_data[REG_VOLTAGE].min_value &&
 			rt_value <= bq27541_data[REG_VOLTAGE].max_value) {
 			if (rt_value > BATTERY_PROTECTED_VOLT) {
@@ -562,22 +552,16 @@ static int bq27541_get_psp(int reg_offset, enum power_supply_property psp,
 		BAT_NOTICE("voltage_now= %u uV\n", val->intval);
 	}
 	if (psp == POWER_SUPPLY_PROP_STATUS) {
+		rt_value &= ~BATT_STS_SOCF;
 		ret = bq27541_device->bat_status = rt_value;
-
-		if ((ac_on || usb_on || wireless_on) && !otg_on) {/* Charging detected */
-			if (bq27541_device->old_capacity == 100) {
-				val->intval = POWER_SUPPLY_STATUS_FULL;
-			} else {
-				val->intval = POWER_SUPPLY_STATUS_CHARGING;
-			}
-		} else if (ret & BATT_STS_SOCF) {		/* Fully Discharged detected */
-			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-		} else {
-			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
-		}
-		BAT_NOTICE("status: %s ret= 0x%04x\n", status_text[val->intval], ret);
+		if(otg_on)
+			val->intval = POWER_SUPPLY_STATUS_CHARGING;
+		else
+			val->intval = POWER_SUPPLY_STATUS_FULL;
+		
 
 	} else if (psp == POWER_SUPPLY_PROP_TEMP) {
+		rt_value = bq27541_data[REG_TEMPERATURE].min_value;
 		ret = bq27541_device->bat_temp = rt_value;
 
 		if (bq27541_device->smbus_status >=0) {
@@ -615,99 +599,10 @@ static int bq27541_get_psp(int reg_offset, enum power_supply_property psp,
 }
 
 static int bq27541_get_capacity(union power_supply_propval *val)
-{
-	s32 ret;
-	s32 temp_capacity;
-	int smb_retry=0;
-	bool check_cap = false;
-	int smb_retry_max = (SMBUS_RETRY + 2);
+{	
+	bq27541_device->bat_capacity = val->intval = bq27541_device->old_capacity = 100;
+	bq27541_device->cap_err=0;	
 
-	bq27541_device->bat_capacity = 0;
-	do {
-		bq27541_device->smbus_status = bq27541_smbus_read_data(REG_CAPACITY, 0 ,&bq27541_device->bat_capacity);
-		if ((bq27541_device->bat_capacity <= 0) || (bq27541_device->bat_capacity > 100)) {
-			check_cap = true;
-			BAT_NOTICE("check capacity, cap = %d, smb_retry = %d\n", bq27541_device->bat_capacity, smb_retry);
-		} else
-			check_cap = false;
-	} while(((bq27541_device->smbus_status < 0) || check_cap) && ( ++smb_retry <= smb_retry_max));
-
-	if (bq27541_device->smbus_status < 0) {
-		dev_err(&bq27541_device->client->dev, "%s: i2c read for %d "
-			"failed bq27541_device->cap_err=%u\n", __func__, REG_CAPACITY, bq27541_device->cap_err);
-
-		if(bq27541_device->cap_err>5 || (bq27541_device->old_capacity == 0xFF)) {
-			return -EINVAL;
-		} else {
-			val->intval = bq27541_device->old_capacity;
-			bq27541_device->cap_err++;
-			BAT_NOTICE("cap_err=%u use old capacity=%u\n", bq27541_device->cap_err, val->intval);
-			return 0;
-		}
-	}
-
-	temp_capacity = ret = bq27541_device->bat_capacity;
-
-	if (!(bq27541_device->bat_capacity >= bq27541_data[REG_CAPACITY].min_value &&
-			bq27541_device->bat_capacity <= bq27541_data[REG_CAPACITY].max_value)) {
-		val->intval = bq27541_device->old_capacity;
-		BAT_NOTICE("use old capacity=%u\n", bq27541_device->old_capacity);
-		return 0;
-	}
-
-	/* start: for mapping %99 to 100%. Lose 84%*/
-	if(temp_capacity==99)
-		temp_capacity=100;
-	if(temp_capacity >=84 && temp_capacity <=98)
-		temp_capacity++;
-	/* for mapping %99 to 100% */
-
-	 /* lose 26% 47% 58%,69%,79% */
-	if(temp_capacity >70 && temp_capacity <80)
-		temp_capacity-=1;
-	else if(temp_capacity >60&& temp_capacity <=70)
-		temp_capacity-=2;
-	else if(temp_capacity >50&& temp_capacity <=60)
-		temp_capacity-=3;
-	else if(temp_capacity >30&& temp_capacity <=50)
-		temp_capacity-=4;
-	else if(temp_capacity >=0&& temp_capacity <=30)
-		temp_capacity-=5;
-
-	/*Re-check capacity to avoid  that temp_capacity <0*/
-	temp_capacity = ((temp_capacity <0) ? 0 : temp_capacity);
-	val->intval = temp_capacity;
-
-	if ((temp_capacity == 0) &&
-		(bq27541_battery_cable_status || wireless_on)) {
-		bq27541_device->bat_capacity_zero_count++;
-		if (bq27541_device->bat_capacity_zero_count >= 6) {
-			bq27541_device->bat_capacity_zero_count = 0;
-			BAT_NOTICE("pretend no charging type to shutdown\n");
-			bq27541_battery_callback(0);
-			wireless_on = 0;
-			bq27541_wireless_callback(0);
-		} else
-			BAT_NOTICE("bat_capacity_zero_count = %d",
-				bq27541_device->bat_capacity_zero_count);
-	} else
-		bq27541_device->bat_capacity_zero_count = 0;
-
-	if (temp_capacity < 5 && battery_check_interval != 10) {
-		battery_check_interval = 10;
-		BAT_NOTICE("battery_check_interval = %d\n",
-			battery_check_interval);
-	} else if (temp_capacity >= 5 &&
-		battery_check_interval != BATTERY_POLLING_RATE) {
-		battery_check_interval = BATTERY_POLLING_RATE;
-		BAT_NOTICE("battery_check_interval = %d\n",
-			battery_check_interval);
-	}
-
-	bq27541_device->old_capacity = val->intval;
-	bq27541_device->cap_err=0;
-
-	BAT_NOTICE("= %u%% ret= %u\n", val->intval, ret);
 	return 0;
 }
 

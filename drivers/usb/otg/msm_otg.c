@@ -93,6 +93,8 @@ static struct workqueue_struct *msm_otg_id_pin_wq;
 static int global_vbus_suspend_status;
 static int global_id_pin_suspend_status;
 
+extern bool otg_on;
+
 /* APQ8064 GPIO pin definition */
 #define APQ_AP_ACOK	23
 #define APQ_OTG_ID_PIN	77
@@ -1269,6 +1271,8 @@ static void msm_otg_start_host(struct usb_otg *otg, int on)
 		dev_dbg(otg->phy->dev, "host on\n");
 		smb345_otg_status(true);
 		otg_host_on = 1;
+		otg_on = true;
+		asus_chg_set_chg_mode(USB_PROPRIETARY_CHARGER);
 
 		// Reset to apply new parameter for host.
 		msm_otg_reset(otg->phy);
@@ -1287,6 +1291,7 @@ static void msm_otg_start_host(struct usb_otg *otg, int on)
 		usb_add_hcd(hcd, hcd->irq, IRQF_SHARED);
 	} else {
 		dev_dbg(otg->phy->dev, "host off\n");
+		otg_on = false;
 
 		usb_remove_hcd(hcd);
 		/* HCD core reset all bits of PORTSC. select ULPI phy */
@@ -1301,6 +1306,7 @@ static void msm_otg_start_host(struct usb_otg *otg, int on)
 
 		smb345_otg_status(false);
 		otg_host_on = 0;
+		asus_chg_set_chg_mode(USB_INVALID_CHARGER);
 	}
 }
 
@@ -1453,12 +1459,16 @@ static int msm_otg_set_host(struct usb_otg *otg, struct usb_bus *host)
 			pm_runtime_get_sync(otg->phy->dev);
 			usb_unregister_notify(&motg->usbdev_nb);
 			msm_otg_start_host(otg, 0);
+			otg_on = true;
 			msm_hsusb_vbus_power(motg, 0);
 			otg->host = NULL;
 			otg->phy->state = OTG_STATE_UNDEFINED;
 			queue_work(system_nrt_wq, &motg->sm_work);
+			asus_chg_set_chg_mode(USB_PROPRIETARY_CHARGER);
 		} else {
 			otg->host = NULL;
+			otg_on = false;
+			asus_chg_set_chg_mode(USB_INVALID_CHARGER);
 		}
 
 		return 0;
